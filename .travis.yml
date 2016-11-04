@@ -1,5 +1,5 @@
 language: python
-sudo: false
+sudo: required #temporary
 dist: trusty
 
 python:
