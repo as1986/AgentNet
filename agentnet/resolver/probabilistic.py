@@ -12,6 +12,7 @@ class ProbabilisticResolver(BaseResolver):
     """
 
     def __init__(self, incoming, assume_normalized=False, seed=1234, output_dtype='int32',
+    def __init__(self, incoming, assume_normalized=False, seed=1234, output_dtype='int32', assume_exp=True,
                  name='ProbabilisticResolver'):
         """
         :param incoming: a lasagne layer that outputs action probability vectors
@@ -35,6 +36,7 @@ class ProbabilisticResolver(BaseResolver):
         # probas float[2] - probability of random and optimal action respectively
 
         self.assume_normalized = assume_normalized
+        self.assume_exp = assume_exp
 
         self.rng = random_streams.RandomStreams(seed)
 
@@ -56,6 +58,9 @@ class ProbabilisticResolver(BaseResolver):
         else:
             # probabilistic branch
             batch_size, n_actions = policy.shape
+
+            if not self.assume_exp:
+                policy = T.exp(policy)
 
             if self.assume_normalized:
                 probas = policy
