@@ -11,7 +11,6 @@ class ProbabilisticResolver(BaseResolver):
         - samples actions with probabilities given by input layer
     """
 
-    def __init__(self, incoming, assume_normalized=False, seed=1234, output_dtype='int32',
     def __init__(self, incoming, assume_normalized=False, seed=1234, output_dtype='int32', assume_exp=True,
                  name='ProbabilisticResolver'):
         """
