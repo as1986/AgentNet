@@ -8,15 +8,15 @@ import numpy as np
 import theano.tensor as T
 from lasagne.layers import InputLayer,DenseLayer,GaussianNoiseLayer,ElemwiseSumLayer,NonlinearityLayer
 
-from warnings import warn
 from collections import OrderedDict
 from lasagne.layers import Layer, DenseLayer
+from ..utils.logging import warn
 
 def diag_to_tril_size(diag):
-    return diag*(diag+1)/2
+    return int(diag*(diag+1)/2)
 
 def tril_size_to_diag(tril_size):
-    return (-0.5 + (0.25 + 2*tril_size)**.5)
+    return int(-0.5 + (0.25 + 2*tril_size)**.5)
 
 class LowerTriangularLayer(Layer):
     def __init__(self, incoming, matrix_diag=None, **kwargs):
