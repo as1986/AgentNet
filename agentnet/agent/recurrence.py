@@ -27,6 +27,7 @@ from ..utils import insert_dim
 from ..utils.format import check_list, check_ordered_dict, unpack_list, supported_sequences,is_theano_object
 from ..utils.layers import DictLayer, get_layer_dtype
 from ..utils.logging import warn
+from ..utils.tensor_ops import get_type,cast_to_type
 
 
 class Recurrence(DictLayer):
@@ -35,6 +36,9 @@ class Recurrence(DictLayer):
     A generic recurrent layer that works with a custom graph.
     Recurrence is a lasagne layer that takes an inner graph and rolls it for several steps using scan.
     Conversely, it can be used as any other lasagne layer, even as a part of another recurrence.
+
+    [tutorial on recurrence](https://github.com/yandexdataschool/AgentNet/blob/master
+/examples/Custom%20rnn%20with%20recurrence.ipynb)
 
     :param input_nonsequences: inputs that are same at each time tick.
         Technically it's a dictionary that maps InputLayer from one-step graph
@@ -88,15 +92,9 @@ class Recurrence(DictLayer):
             - state variable sequences in order of dict.items()
             - tracked_outputs in given order
 
-        WARNING! can not be used further as an atomic lasagne layer.
-        Instead, consider calling .get_sequences() or unpacking it
-
-        state_sequence_layers, output_sequence_layers = Recurrence(...).get_sequences()
-        (see .get_sequences help for more info)
-
-        OR
-
-        state_seq_layer, ... , output1_seq_layer, output2_seq_layer, ... = Recurrence(...)
+        WARNING! this layer has a dictionary of outputs. 
+        It shouldn't used further as an atomic lasagne layer.
+        Instead, consider using my_recurrence[one_of_states_or_outputs] (see code below)
 
     Examples
     --------
@@ -264,8 +262,8 @@ class Recurrence(DictLayer):
         if verify_graph:
             # verifying graph topology (assertions)
 
-            # all recurrent graph inputs and prev_states are unique (no input/prev_state is used more than once)
-            assert len(self.all_inputs) == len(set(self.all_inputs))
+            #all prev_states are unique (no prev_state is set with more than one value)
+            assert len(list(self.state_variables.values())) == len(set(self.state_variables.values()))
 
             # all state_init correspond to defined state variables
             for state_out in list(self.state_init.keys()):
@@ -440,7 +438,7 @@ class Recurrence(DictLayer):
     def get_output_for(self, inputs, accumulate_updates="warn",recurrence_flags={}, **kwargs):
         """
         returns history of agent interaction with environment for given number of turns.
-        
+
         parameters:
             inputs - [state init]  + [input_nonsequences] + [input_sequences]
                 Each part is a list of theano expressions for layers in the order they were
@@ -474,42 +472,55 @@ class Recurrence(DictLayer):
             raise ValueError("Need to set batch_size explicitly for recurrence")
 
 
-        # reshape sequences from [batch, time, ...] to [time,batch,...] to fit scan
-        sequences = [seq.swapaxes(1, 0) for seq in sequences]
-
-        #here we create outputs_info for scan
+        #here we create outputs_info for scan, basically initial values for states and outputs
         ## initial states that are given as input
         initial_states_provided = OrderedDict(list(zip(self.state_init, initial_states_provided)))
 
-        def get_initial_state(state_out_layer,batch_size=batch_size):
-            """Pick dedicated initial state or create zeros of appropriate shape and dtype"""
+        def get_initial_state(layer, batch_size=batch_size):
+            """Pick dedicated initial state or create zeros of appropriate shape and dtype
+            :param layer: layer for new hidden state (key of self.state_variables)
+            :param batch_size: symbolic batch_size
+            """
             # if we have a dedicated init, use it
-            if state_out_layer in initial_states_provided:
-                initial_state = initial_states_provided[state_out_layer]
+            if layer in initial_states_provided:
+                initial_state = initial_states_provided[layer]
             # otherwise initialize with zeros
             else:
-                dtype = get_layer_dtype(state_out_layer)
-                initial_state = T.zeros((batch_size,) + tuple(state_out_layer.output_shape[1:]),dtype=dtype)
+                assert None not in layer.output_shape[1:],\
+                    "Some of your state layers ({}) has undefined shape along non-batch dimension. (shape: {}) " \
+                    "Therefore, it's initial value can't be inferred. Please set explicit initial value via state_init" \
+                    "".format(layer.name or layer, layer.output_shape)
 
-                #cast to non-broadcastable tensortype
-                t_state = T.TensorType(dtype, (False,) * initial_state.ndim)
-                initial_state = t_state.convert_variable(initial_state)
-                assert initial_state is not None #if None, conversion failed. report ASAP
+                dtype = get_layer_dtype(layer)
+                initial_state = T.zeros((batch_size,) + tuple(layer.output_shape[1:]), dtype=dtype)
+                #disable broadcasting along all axes (lasagne outputs are non-broadcastable)
+                initial_state = T.unbroadcast(initial_state, *range(initial_state.ndim))
 
             return initial_state
 
         initial_states = list(map(get_initial_state, self.state_variables))
 
+        # dummy initial values for tracked_outputs.
+        # We need to provide them for step_masked to be able to backtrack to them. Also unroll scan requires them.
+        # Initial shapes for outputs are inferred by calling get_one_step and taking shapes from it.
+        # Theano optimizes shape computation without computing get_out_step outputs themselves
+        # the resulting graph would be like (var1.shape[0],var1.shape[2]*3,10) so this operation is zero-cost.
+        state_feed_dict = dict(zip(self.state_variables.keys(),initial_states))
+        input_feed_dict = dict(zip(list(chain(self.input_nonsequences.keys(), self.input_sequences.keys())),
+                                   list(chain(nonsequences,[seq[:,0] for seq in sequences]))))
+        initial_output_fillers = self.get_one_step(state_feed_dict,input_feed_dict)[1]
+        # disable broadcasting of zeros_like(v) along all axes (since lasagne outputs are non-broadcastable)
+        initial_output_fillers = [T.unbroadcast(T.zeros_like(v),*range(v.ndim))
+                                  for v in initial_output_fillers]
+        #/end of that nonsense
 
-        #dummy values for initial outputs. They have no role in computation, but if nonsequences are present,
-        # AND scan is not unrolled, the step function will not receive prev outputs as parameters, while
-        # if unroll_scan, these parameters are present. we forcibly initialize outputs to prevent
-        # complications during parameter parsing in step function below.
-        initial_output_fillers = list(map(get_initial_state, self.tracked_outputs))
-        
-        
+        #stack all initializers together
         outputs_info = initial_states + initial_output_fillers
-        
+
+        # reshape sequences from [batch, time, ...] to [time,batch,...] to fit scan
+        sequences = [seq.swapaxes(1, 0) for seq in sequences]
+
+
         # recurrent step function
         def step(*args):
 
@@ -527,19 +538,23 @@ class Recurrence(DictLayer):
             new_states, new_outputs = self.get_one_step(prev_states_dict, inputs_dict, **recurrence_flags)
 
 
-            #make sure output variable is of exactly the same type as corresponding input
+            #make sure new state variables are of exactly the same type as their initial value
+            state_names = [layer.name or str(layer) for layer in list(self.state_variables.keys())]
+            for i in range(len(state_names)):
+                try:
+                    new_states[i] = cast_to_type(new_states[i],get_type(prev_states[i]))
+                except:
+                    raise ValueError("Could not convert new state {}, of type {}, to it's declared state {}"
+                                     "".format(state_names[i],get_type(new_states[i]),get_type(prev_states[i])))
 
-            get_type = lambda tensor: T.TensorType(tensor.dtype,
-                                                   tensor.broadcastable,
-                                                   sparse_grad=getattr(tensor.type,"sparse_grad",False))
-
-            new_states = [get_type(prev_state).convert_variable(state.astype(prev_state.dtype))
-                            for (prev_state,state) in zip(prev_states,new_states)]
-            assert None not in new_states, "Some state variables has different dtype/shape from init ."
-
-            new_outputs = [get_type(prev_out).convert_variable(out.astype(prev_out.dtype))
-                            for (prev_out,out) in zip(prev_outputs,new_outputs)]
-            assert None not in new_outputs, "Some of the tracked outputs has shape/dtype changing over time. Please report this."
+            #make sure output variables are of exactly the same type as their initial value
+            output_names = [layer.name or str(layer) for layer in self.tracked_outputs]
+            for i in range(len(output_names)):
+                try:
+                    new_outputs[i] = cast_to_type(new_outputs[i],get_type(prev_outputs[i]))
+                except:
+                    raise ValueError("Could not convert output of {}, of type {}, to it's declared state {}"
+                                     "".format(output_names[i],get_type(new_outputs[i]),get_type(prev_outputs[i])))
 
             return new_states + new_outputs
 
