@@ -68,6 +68,9 @@ class Recurrence(DictLayer):
         Can be a list of initializer layers for states in the order of dict.items()
         if so, it's length must match len(state_variables)
 
+    :param mask_input: Boolean mask for sequences (like the same param in lasagne.layers.RecurrentLayer). 
+        When mask==1, computes next item as usual. Elif mask==0, next item is the copy of previous one.
+
     :param unroll_scan: whether or not to use lasagne.utils.unroll_scan instead of theano.scan.
         Note that if unroll_scan == False, one should use .get_rng_updates after .get_output to collect
         automatic updates
@@ -87,6 +90,9 @@ class Recurrence(DictLayer):
     :param verify_graph: whether to assert that all inner graph input layers are registered for the recurrence
         as inputs or prev states and all inputs/prev states are actually needed to compute next states/outputs.
         NOT the same as theano.scan(strict=True).
+
+    :param force_cast_types: if True, automatically converts layer types for layers to the declared type.
+        Otherwise raises an error.
 
     :returns: a tuple of sequences with shape [batch,tick, ...]
             - state variable sequences in order of dict.items()
@@ -132,10 +138,12 @@ class Recurrence(DictLayer):
                  mask_input=None,
                  delayed_states=tuple(),
                  verify_graph=True,
+                 force_cast_types=False,
                  name="YetAnotherRecurrence",
                  ):
         self.n_steps = n_steps
         self.unroll_scan = unroll_scan
+        self.force_cast_types = force_cast_types
         self.updates=theano.OrderedUpdates()
         self._updates_received=True
         self.mask_input = mask_input
@@ -508,7 +516,7 @@ class Recurrence(DictLayer):
         state_feed_dict = dict(zip(self.state_variables.keys(),initial_states))
         input_feed_dict = dict(zip(list(chain(self.input_nonsequences.keys(), self.input_sequences.keys())),
                                    list(chain(nonsequences,[seq[:,0] for seq in sequences]))))
-        initial_output_fillers = self.get_one_step(state_feed_dict,input_feed_dict)[1]
+        initial_output_fillers = self.get_one_step(state_feed_dict,input_feed_dict,**recurrence_flags)[1]
         # disable broadcasting of zeros_like(v) along all axes (since lasagne outputs are non-broadcastable)
         initial_output_fillers = [T.unbroadcast(T.zeros_like(v),*range(v.ndim))
                                   for v in initial_output_fillers]
@@ -542,18 +550,24 @@ class Recurrence(DictLayer):
             state_names = [layer.name or str(layer) for layer in list(self.state_variables.keys())]
             for i in range(len(state_names)):
                 try:
+                    if self.force_cast_types:
+                        new_states[i] = new_states[i].astype(prev_states[i].dtype)
                     new_states[i] = cast_to_type(new_states[i],get_type(prev_states[i]))
                 except:
-                    raise ValueError("Could not convert new state {}, of type {}, to it's declared state {}"
+                    raise ValueError("Could not convert new state {}, of type {}, to it's previous/initial state type "
+                                     "{}. Cast type manually or set force_cast_types=True on creation."
                                      "".format(state_names[i],get_type(new_states[i]),get_type(prev_states[i])))
 
             #make sure output variables are of exactly the same type as their initial value
             output_names = [layer.name or str(layer) for layer in self.tracked_outputs]
             for i in range(len(output_names)):
                 try:
+                    if self.force_cast_types:
+                        new_outputs[i] = new_outputs[i].astype(prev_outputs[i].dtype)
                     new_outputs[i] = cast_to_type(new_outputs[i],get_type(prev_outputs[i]))
                 except:
-                    raise ValueError("Could not convert output of {}, of type {}, to it's declared state {}"
+                    raise ValueError("Could not convert output of {}, of type {}, to it's previous/initial state type "
+                                     "{}. Cast type manually or set force_cast_types=True on creation."
                                      "".format(output_names[i],get_type(new_outputs[i]),get_type(prev_outputs[i])))
 
             return new_states + new_outputs
