@@ -173,3 +173,111 @@ def test_dot_attention():
     #check if probs are one-hot
     assert hard_probs_seq.shape == (5, 10, 25) #attention sequences, 5 samples/10ticks/25 input seq length
     assert len(np.unique(hard_probs_seq.ravel()))==2  #only 0's and 1's
+
+
+
+from agentnet.memory.attention import self_attention, multihead_attention
+def test_self_attention():
+    """This tests parallel computation of self-attention, 
+    where each element of next hidden sequence casts attention into previous hidden sequence.
+
+    This is vaguely inspired by https://arxiv.org/abs/1706.03762.
+    """
+    VOCAB_SIZE = 100
+    BATCH_SIZE = 10
+    SEQ_LENGTH = 20
+    input_var = T.arange(BATCH_SIZE * SEQ_LENGTH).reshape([BATCH_SIZE, SEQ_LENGTH]) % VOCAB_SIZE
+
+    l_inp = InputLayer((None, None), input_var)
+    l_emb = EmbeddingLayer(l_inp, VOCAB_SIZE, 32)
+    l_self_attn = self_attention(l_emb, key_size=48,value_size=50)
+    l_self_attn2 = self_attention(l_self_attn, key_size=64,value_size=100)
+
+    out = get_output(l_self_attn2).eval()
+
+    assert tuple(out.shape)==(BATCH_SIZE,SEQ_LENGTH,100)
+
+
+def test_multihead_attention():
+    """
+    minimalstic test that showcases attentive RNN that reads some chunk
+    of input sequence on each tick and outputs nothing.
+
+    This time it uses Multihead DotAttention [aka multiplicative attention] instead of regular one.
+    """
+
+    # step inner graph
+    class step:
+        enc_activations = InputLayer((None, None, 12), name='placeholder for encoder activations (to be attended)')
+        prev_gru = InputLayer((None, 15), name='gru prev state (15 units)')
+
+        keys_seq = DenseLayer(enc_activations,30,num_leading_axes=2,nonlinearity=None)
+
+        attention = multihead_attention(enc_activations, prev_gru,
+                                        key_sequence = keys_seq,
+                                        num_heads=3, use_dense_layer=True,)
+
+        gru = GRUCell(prev_gru, attention['attn'], name='rnn that reads enc_sequence with attention')
+
+        attn, attn_probs = attention['attn'],attention['probs']  # weights from inside attention
+
+    # outer graph
+
+
+    encoder_activations = InputLayer((None, None, 12), name='encoder sequence (will be sent to enc_sequence)')
+
+    rec = agentnet.Recurrence(input_nonsequences={step.enc_activations: encoder_activations},
+                              state_variables={step.gru: step.prev_gru},
+                              tracked_outputs=[step.attn_probs,step.attn],
+
+                              unroll_scan=False,
+                              n_steps=10)
+
+    weights = get_all_params(rec)
+
+    gru_states, attn_heads_seq, attention_probs_seq = rec[step.gru, step.attn, step.attn_probs]
+
+    run = theano.function([encoder_activations.input_var], get_output([gru_states, attn_heads_seq, attention_probs_seq]),
+                          updates=rec.get_automatic_updates(), allow_input_downcast=True)
+
+    # run on surrogate data
+    gru_seq, heads_seq, probs_seq = run(np.random.randn(5, 25, 12))
+
+    assert gru_seq.shape == (5, 10, 15)  # hidden GRU strates, 5 samples/10ticks/15units
+    assert probs_seq.shape == (5, 10, 3, 25)  # attention sequences, 5 samples/10ticks/3heads/25 input seq length
+    assert heads_seq.shape == (5, 10, 3*12)  # attention sequences, 5 samples/10ticks/3heads*30units
+    # hard attention
+    hard_outputs = get_output([gru_states, attention_probs_seq], recurrence_flags={'hard_attention': True})
+
+    hard_run = theano.function([encoder_activations.input_var], hard_outputs,
+                               updates=rec.get_automatic_updates(), allow_input_downcast=True)
+
+    # run on surrogate data
+    _, hard_probs_seq = hard_run(np.random.randn(5, 25, 12))
+
+    # check if probs are one-hot
+    assert hard_probs_seq.shape == (5, 10, 3, 25)  # attention sequences, 5 samples/10ticks/3heads/25 input seq length
+    assert len(np.unique(hard_probs_seq.ravel())) == 2  # only 0's and 1's
+
+
+def test_multihead_self_attention():
+    """This tests parallel computation of self-attention, 
+    where each element of next hidden sequence casts attention into previous hidden sequence.
+
+    This is vaguely inspired by https://arxiv.org/abs/1706.03762.
+    """
+    VOCAB_SIZE = 100
+    BATCH_SIZE = 10
+    SEQ_LENGTH = 20
+    input_var = T.arange(BATCH_SIZE * SEQ_LENGTH).reshape([BATCH_SIZE, SEQ_LENGTH]) % VOCAB_SIZE
+
+    l_inp = InputLayer((None, None), input_var)
+    l_emb = EmbeddingLayer(l_inp, VOCAB_SIZE, 32)
+    l_self_attn = self_attention(l_emb, key_size=48,value_size=50,
+                                 attn_class=multihead_attention,num_heads=5)
+    l_self_attn2 = self_attention(l_self_attn, key_size=64,value_size=100,
+                                  attn_class=multihead_attention,num_heads=5)
+
+    out = get_output(l_self_attn2).eval()
+
+    assert tuple(out.shape)==(BATCH_SIZE,SEQ_LENGTH,100*5)

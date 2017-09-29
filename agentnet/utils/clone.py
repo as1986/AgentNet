@@ -5,10 +5,19 @@ Utility functions that can clone lasagne network layers in a custom way.
 - DPG-like methods where critic has to process both optimal and actual actions
 
 """
-import lasagne
-from .format import check_list,check_ordered_dict
 from copy import deepcopy
+
+import lasagne
+
+from .format import check_list, check_ordered_dict
 from ..utils.logging import warn
+
+
+from .layers import reapply as _reapply
+def reapply(*args,**kwargs):
+    warn("DEPRECATION: Reapply has been moved to agentnet.utils.layers.reapply (or agentnet.utils.reapply)."
+         "It will be removed from agentnet.utils.clone in the next release.")
+    return _reapply(*args,**kwargs)
 
 def clone_network(original_network, bottom_layers=None,
                   share_params=False, share_inputs=True,name_prefix = None):
@@ -75,6 +84,8 @@ def clone_network(original_network, bottom_layers=None,
 
     #add shared weights
     if share_params:
+        warn("clone_network with share_params=True may be unreliable in some cases. "\
+             "If you want to simply apply the network elsewhere, use agentnet.utils.layers.reapply")
         all_weights = lasagne.layers.get_all_params(original_layers)
         for weight_var in all_weights:
             #if weight already in memo
@@ -140,22 +151,4 @@ def clone_network(original_network, bottom_layers=None,
     return network_clone
 
 
-def reapply(layer_or_layers, new_bottom, share_params=True, name_prefix=None):
-    """
-    Applies a part of lasagne network to a new place. Wraps clone_network
-    :param layer_or_layers: layers to be re-applied
-    :param new_bottom: a dict {old_layer:new_layer} that defines which layers should be substituted by which other layers
-    :param share_params: if True, cloned network will use same shared variables for weights.
-        Otherwise new shared variables will be created and set to original NN values.
-        WARNING! shared weights must be accessible via lasagne.layers.get_all_params with no flags
-        If you want custom other parameters to be shared, agentnet.utils.clone_network
-    :param name_prefix: if not None, adds this prefix to all the layers and params of the cloned network
 
-    :return: a new layer or layers that represent re-applying layer_or_layers to new_bottom
-    """
-    assert isinstance(new_bottom,dict)
-    for layer in lasagne.layers.get_all_layers(layer_or_layers,list(new_bottom.keys())):
-        if isinstance(layer,lasagne.layers.InputLayer):
-            assert layer in new_bottom, "must explicitly provide all new_bottom for each branch of original network. " \
-                                        "Assert caused by {}. For dirty hacks, use clone_network.".format(layer.name or layer)
-    return clone_network(layer_or_layers, new_bottom, share_params=share_params, share_inputs=False, name_prefix=name_prefix)
