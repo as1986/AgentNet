@@ -212,7 +212,7 @@ class GRUNLMemoryLayer(lasagne.layers.MergeLayer):
                  hidden_update=Gate(W_cell=None, nonlinearity=nonlinearities.tanh),
                  nl_update=init.Normal(0.1),
                  nl_update_b=init.Constant(0.),
-                 nl_update_type=lasagne.nonlinearities.rectifier,
+                 nl_update_type=lasagne.nonlinearities.rectify,
                  grad_clipping=5.,
                  **kwargs):
 
